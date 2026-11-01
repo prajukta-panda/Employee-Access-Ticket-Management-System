@@ -6,6 +6,7 @@ from authentication import get_db, get_current_user
 from models import User, Ticket
 from schemas import TicketCreate, TicketResponse , TicketUpdate
 from enums import TicketStatus,UserRole
+from schemas import TicketStatusUpdate
 
 
 router = APIRouter(
@@ -218,4 +219,80 @@ def assign_ticket(
     db.commit()
     db.refresh(ticket)
 
-    return ticket   
+    return ticket 
+@router.patch("/{ticket_id}/status")
+def update_ticket_status(
+    ticket_id: int,
+    status_data: TicketStatusUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    # Find the ticket
+    ticket = db.query(Ticket).filter(
+        Ticket.id == ticket_id
+    ).first()
+
+    if ticket is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Ticket not found"
+        )
+
+    new_status = status_data.status
+
+    # Admin and Manager permissions
+    if current_user.role in (UserRole.ADMIN, UserRole.MANAGER):
+        pass
+
+    # Support Engineer permissions
+    elif current_user.role == UserRole.SUPPORT:
+        if ticket.assigned_to != current_user.id:
+            raise HTTPException(
+                status_code=403,
+                detail="You can only update tickets assigned to you"
+            )
+
+        if ticket.status == TicketStatus.OPEN and new_status == TicketStatus.IN_PROGRESS:
+            pass
+
+        elif ticket.status == TicketStatus.IN_PROGRESS and new_status == TicketStatus.RESOLVED:
+            pass
+
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="Support engineers can only move tickets from OPEN to IN_PROGRESS or IN_PROGRESS to RESOLVED"
+            )
+
+    # Employee permissions
+    elif current_user.role == UserRole.EMPLOYEE:
+        if ticket.created_by != current_user.id:
+            raise HTTPException(
+                status_code=403,
+                detail="You can only close tickets created by you"
+            )
+
+        if ticket.status != TicketStatus.RESOLVED or new_status != TicketStatus.CLOSED:
+            raise HTTPException(
+                status_code=400,
+                detail="You can only close a resolved ticket"
+            )
+
+    else:
+        raise HTTPException(
+            status_code=403,
+            detail="You do not have permission to update ticket status"
+        )
+
+    # Update the status
+    ticket.status = new_status
+    ticket.updated_at = datetime.utcnow()
+
+    db.commit()
+    db.refresh(ticket)
+
+    return {
+        "message": "Ticket status updated successfully",
+        "ticket_id": ticket.id,
+        "status": ticket.status
+    }      
