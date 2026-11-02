@@ -3,6 +3,7 @@ from enums import UserRole, Priority,TicketStatus
 from datetime import datetime
 from typing import Optional
 
+
 #pydantic schema used as a format what user should give in swagger ui just like html in frontend
 # -------------------------
 # USER SCHEMAS
@@ -92,3 +93,13 @@ class AdminUserCreate(BaseModel):
     email: EmailStr
     password: str
     role: UserRole
+class TicketStatusUpdate(BaseModel):
+    status: TicketStatus
+class CommentResponse(BaseModel):
+    id: int
+    ticket_id: int
+    user_id: int
+    message: str
+    created_at: datetime
+
+    model_config = {"from_attributes": True}   

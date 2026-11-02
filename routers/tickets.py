@@ -3,10 +3,11 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from datetime import datetime
 from authentication import get_db, get_current_user
-from models import User, Ticket
+from models import User, Ticket , Comment
 from schemas import TicketCreate, TicketResponse , TicketUpdate
 from enums import TicketStatus,UserRole
-from schemas import TicketStatusUpdate
+from schemas import TicketStatusUpdate ,CommentCreate, CommentResponse
+from audit import create_audit_log
 
 
 router = APIRouter(
@@ -35,8 +36,19 @@ def create_ticket(
     )
 
     db.add(new_ticket)
+
+    db.flush()
+
+    create_audit_log(
+    db=db,
+    action="TICKET_CREATED",
+    user_id=current_user.id,
+    ticket_id=new_ticket.id
+    )
+
     db.commit()
     db.refresh(new_ticket)
+    
 
     return new_ticket
 @router.get("/")
@@ -53,43 +65,40 @@ def list_tickets(
 
     return tickets
 
-@router.get("/{ticket_id}")
-def get_ticket(
-    ticket_id: int,
+@router.get("/", response_model=list[TicketResponse])
+def get_tickets(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    ticket = (
-        db.query(Ticket)
-        .filter(Ticket.id == ticket_id)
-        .first()
-    )
+    # Admin and Manager can see all tickets
+    if current_user.role in (UserRole.ADMIN, UserRole.MANAGER):
+        tickets = db.query(Ticket).order_by(
+            Ticket.created_at.desc()
+        ).all()
 
-    # Check whether the ticket exists
-    if ticket is None:
+    # Employee can see only tickets created by them
+    elif current_user.role == UserRole.EMPLOYEE:
+        tickets = db.query(Ticket).filter(
+            Ticket.created_by == current_user.id
+        ).order_by(
+            Ticket.created_at.desc()
+        ).all()
+
+    # Support can see only tickets assigned to them
+    elif current_user.role == UserRole.SUPPORT:
+        tickets = db.query(Ticket).filter(
+            Ticket.assigned_to == current_user.id
+        ).order_by(
+            Ticket.created_at.desc()
+        ).all()
+
+    else:
         raise HTTPException(
-            status_code=404,
-            detail="Ticket not found"
+            status_code=403,
+            detail="You do not have permission to view tickets"
         )
 
-    # Admins and managers can view all tickets
-    if current_user.role in (UserRole.ADMIN, UserRole.MANAGER):
-        return ticket
-
-    # Employees can view only tickets they created
-    if current_user.role == UserRole.EMPLOYEE:
-        if ticket.created_by == current_user.id:
-            return ticket
-
-    # Support users can view only tickets assigned to them
-    if current_user.role == UserRole.SUPPORT:
-        if ticket.assigned_to == current_user.id:
-            return ticket
-
-    raise HTTPException(
-        status_code=403,
-        detail="You do not have permission to view this ticket"
-    )
+    return tickets
 @router.patch("/{ticket_id}", response_model=TicketResponse)
 def update_ticket(
     ticket_id: int,
@@ -215,6 +224,13 @@ def assign_ticket(
     # 5. Assign and save
     ticket.assigned_to = assignee.id
     ticket.updated_at = datetime.utcnow()
+    
+    create_audit_log(
+    db=db,
+    action="TICKET_ASSIGNED",
+    user_id=current_user.id,
+    ticket_id=ticket.id
+    )
 
     db.commit()
     db.refresh(ticket)
@@ -287,7 +303,14 @@ def update_ticket_status(
     # Update the status
     ticket.status = new_status
     ticket.updated_at = datetime.utcnow()
-
+    
+    create_audit_log(
+    db=db,
+    action=f"STATUS_CHANGED_TO_{new_status.value.upper()}",
+    user_id=current_user.id,
+    ticket_id=ticket.id
+    )
+    
     db.commit()
     db.refresh(ticket)
 
@@ -296,3 +319,115 @@ def update_ticket_status(
         "ticket_id": ticket.id,
         "status": ticket.status
     }      
+@router.post(
+    "/{ticket_id}/comments",
+    response_model=CommentResponse,
+    status_code=201
+)
+def add_comment(
+    ticket_id: int,
+    comment_data: CommentCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    # Find the ticket
+    ticket = db.query(Ticket).filter(
+        Ticket.id == ticket_id
+    ).first()
+
+    if ticket is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Ticket not found"
+        )
+
+    # Check whether the user can access this ticket
+    if current_user.role in (UserRole.ADMIN, UserRole.MANAGER):
+        pass
+
+    elif current_user.role == UserRole.EMPLOYEE:
+        if ticket.created_by != current_user.id:
+            raise HTTPException(
+                status_code=403,
+                detail="You can only comment on your own tickets"
+            )
+
+    elif current_user.role == UserRole.SUPPORT:
+        if ticket.assigned_to != current_user.id:
+            raise HTTPException(
+                status_code=403,
+                detail="You can only comment on tickets assigned to you"
+            )
+
+    else:
+        raise HTTPException(
+            status_code=403,
+            detail="You do not have permission to comment"
+        )
+
+    # Create the comment
+    new_comment = Comment(
+        ticket_id=ticket.id,
+        user_id=current_user.id,
+        message=comment_data.message
+    )
+
+    db.add(new_comment)
+    db.commit()
+    db.refresh(new_comment)
+
+    return new_comment
+
+
+@router.get(
+    "/{ticket_id}/comments",
+    response_model=list[CommentResponse]
+)
+def get_comments(
+    ticket_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    # Find the ticket
+    ticket = db.query(Ticket).filter(
+        Ticket.id == ticket_id
+    ).first()
+
+    if ticket is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Ticket not found"
+        )
+
+    # Check access permissions
+    if current_user.role in (UserRole.ADMIN, UserRole.MANAGER):
+        pass
+
+    elif current_user.role == UserRole.EMPLOYEE:
+        if ticket.created_by != current_user.id:
+            raise HTTPException(
+                status_code=403,
+                detail="You cannot view comments on this ticket"
+            )
+
+    elif current_user.role == UserRole.SUPPORT:
+        if ticket.assigned_to != current_user.id:
+            raise HTTPException(
+                status_code=403,
+                detail="You cannot view comments on this ticket"
+            )
+
+    else:
+        raise HTTPException(
+            status_code=403,
+            detail="You do not have permission to view comments"
+        )
+
+    # Retrieve comments in chronological order
+    comments = db.query(Comment).filter(
+        Comment.ticket_id == ticket.id
+    ).order_by(
+        Comment.created_at.asc()
+    ).all()
+
+    return comments    
